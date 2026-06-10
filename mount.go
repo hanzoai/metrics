@@ -1,17 +1,19 @@
-// HIP-0106 Mount() entry point for the native metrics subsystem.
+// HIP-0106 Mount() entry point for the native observability subsystem.
 //
 //	import _ "github.com/hanzoai/metrics" // init() registers the subsystem
 //
-// At startup the cloud binary iterates its registry and calls Mount() for each
-// enabled subsystem, attaching /v1/metrics/* to the shared zip.App. Ingest is
-// luxfi/metric.MetricBatch (the ZAP MsgMetricBatch payload); storage and query
-// are native — there is no prometheus, no scrape endpoint, no /api/ path.
+// One subsystem serves all three signals — metrics, logs, traces — under
+// /v1/{metrics,logs,traces}/* on the shared zip.App. Storage is native and
+// WAL-durable; ingest for metrics is luxfi/metric.MetricBatch (the ZAP
+// MsgMetricBatch payload). Every request is scoped to a tenant via the
+// gateway-minted X-Org-Id header (falling back to the deployment brand), so the
+// same binary serves any tenant with hard data isolation. There is no
+// prometheus, no Grafana, no scrape endpoint, no /api/ path.
 package metrics
 
 import (
 	"fmt"
 	"net/http"
-	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -21,16 +23,14 @@ import (
 )
 
 // Version is surfaced on the /health routes.
-const Version = "0.1.0"
+const Version = "0.3.0"
 
-// The three native observability signals share the WAL-backed store pattern and
-// mount under one subsystem. A durable per-tenant backend can replace each store
-// behind its existing API without touching the handlers below.
-var (
-	store      = NewStore()      // metrics
-	logStore   = NewLogStore()   // logs   (Loki-free)
-	traceStore = NewTraceStore() // traces (Tempo-free)
-)
+// reg is the process-global per-tenant store registry, initialised in Mount.
+var reg *Registry
+
+// brand is the deployment brand, used as the default org when a request carries
+// no X-Org-Id (single-tenant deployments).
+var brand string
 
 // init registers the subsystem. cloud.MountFunc takes app as `any` (to avoid an
 // import cycle in pkg/cloud), so we assert it to *zip.App and call the typed Mount.
@@ -44,47 +44,39 @@ func init() {
 	})
 }
 
-// Mount registers the native metrics routes on the shared cloud App per HIP-0106.
+// orgOf resolves the tenant for a request: the gateway-minted X-Org-Id header,
+// else the deployment brand, else "default".
+func orgOf(c *zip.Ctx) string {
+	if org := c.Header("X-Org-Id"); org != "" {
+		return org
+	}
+	if brand != "" {
+		return brand
+	}
+	return "default"
+}
+
+// Mount registers the native observability routes on the shared cloud App.
 func Mount(app *zip.App, deps cloud.Deps) error {
 	log := deps.Logger.New("subsystem", "o11y")
-
-	// Durability — replay/append WALs under DataDir so all three signals survive
-	// restart. Falls back to in-memory if DataDir is unset or unwritable.
-	if deps.DataDir != "" {
-		dir := filepath.Join(deps.DataDir, "o11y")
-		for name, enable := range map[string]func(string) error{
-			"metrics.wal": store.EnableDurability,
-			"logs.wal":    logStore.EnableDurability,
-			"traces.wal":  traceStore.EnableDurability,
-		} {
-			if err := enable(filepath.Join(dir, name)); err != nil {
-				log.Warn("durability disabled", "wal", name, "err", err)
-			}
-		}
-	}
+	reg = NewRegistry(deps.DataDir)
+	brand = deps.Brand
 
 	// --- Metrics ---
-	// Liveness/readiness — always answers, no auth, no external dep.
 	app.Get("/v1/metrics/health", func(c *zip.Ctx) error {
 		return c.JSON(http.StatusOK, map[string]any{
-			"status":  "ok",
-			"service": "metrics",
-			"version": Version,
-			"series":  store.SeriesCount(),
+			"status": "ok", "service": "metrics", "version": Version,
+			"series": reg.For(orgOf(c)).Metrics.SeriesCount(), "org": orgOf(c),
 		})
 	})
-
-	// Batch ingest — accepts a luxfi/metric.MetricBatch (the canonical ZAP
-	// MsgMetricBatch wire shape). POST /v1/metrics/batch.
+	// Batch ingest — luxfi/metric.MetricBatch (the ZAP MsgMetricBatch wire shape).
 	app.Post("/v1/metrics/batch", func(c *zip.Ctx) error {
 		var b metric.MetricBatch
 		if err := c.Bind(&b); err != nil {
 			return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid metric batch"})
 		}
-		return c.JSON(http.StatusOK, map[string]any{"written": store.IngestBatch(&b)})
+		return c.JSON(http.StatusOK, map[string]any{"written": reg.For(orgOf(c)).Metrics.IngestBatch(&b)})
 	})
-
-	// Native write — POST /v1/metrics/write {"series":[{"name","labels","samples"}]}.
 	app.Post("/v1/metrics/write", func(c *zip.Ctx) error {
 		var req struct {
 			Series []Series `json:"series"`
@@ -92,27 +84,26 @@ func Mount(app *zip.App, deps cloud.Deps) error {
 		if err := c.Bind(&req); err != nil {
 			return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid write request"})
 		}
+		st := reg.For(orgOf(c)).Metrics
 		n := 0
 		for _, ser := range req.Series {
 			for _, smp := range ser.Samples {
-				store.Append(ser.Name, ser.Labels, smp)
+				st.Append(ser.Name, ser.Labels, smp)
 				n++
 			}
 		}
 		return c.JSON(http.StatusOK, map[string]any{"written": n})
 	})
-
-	// Range query — GET /v1/metrics/query?name=X&start=<ns>&end=<ns>&match=k=v,k2=v2.
 	app.Get("/v1/metrics/query", func(c *zip.Ctx) error {
 		start, _ := strconv.ParseInt(c.Query("start"), 10, 64)
 		end, _ := strconv.ParseInt(c.Query("end"), 10, 64)
-		res := store.Query(c.Query("name"), parseMatchers(c.Query("match")), start, end)
+		res := reg.For(orgOf(c)).Metrics.Query(c.Query("name"), parseMatchers(c.Query("match")), start, end)
 		return c.JSON(http.StatusOK, map[string]any{"count": len(res), "series": res})
 	})
 
 	// --- Logs (native, Loki-free) ---
 	app.Get("/v1/logs/health", func(c *zip.Ctx) error {
-		return c.JSON(http.StatusOK, map[string]any{"status": "ok", "service": "logs", "version": Version, "records": logStore.Count()})
+		return c.JSON(http.StatusOK, map[string]any{"status": "ok", "service": "logs", "version": Version, "records": reg.For(orgOf(c)).Logs.Count()})
 	})
 	app.Post("/v1/logs/write", func(c *zip.Ctx) error {
 		var req struct {
@@ -121,8 +112,9 @@ func Mount(app *zip.App, deps cloud.Deps) error {
 		if err := c.Bind(&req); err != nil {
 			return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid logs write"})
 		}
+		st := reg.For(orgOf(c)).Logs
 		for _, r := range req.Records {
-			logStore.Append(r)
+			st.Append(r)
 		}
 		return c.JSON(http.StatusOK, map[string]any{"written": len(req.Records)})
 	})
@@ -130,13 +122,13 @@ func Mount(app *zip.App, deps cloud.Deps) error {
 		start, _ := strconv.ParseInt(c.Query("start"), 10, 64)
 		end, _ := strconv.ParseInt(c.Query("end"), 10, 64)
 		limit, _ := strconv.Atoi(c.Query("limit"))
-		res := logStore.Query(parseMatchers(c.Query("match")), start, end, c.Query("contains"), limit)
+		res := reg.For(orgOf(c)).Logs.Query(parseMatchers(c.Query("match")), start, end, c.Query("contains"), limit)
 		return c.JSON(http.StatusOK, map[string]any{"count": len(res), "records": res})
 	})
 
 	// --- Traces (native, Tempo-free) ---
 	app.Get("/v1/traces/health", func(c *zip.Ctx) error {
-		return c.JSON(http.StatusOK, map[string]any{"status": "ok", "service": "traces", "version": Version, "spans": traceStore.Count()})
+		return c.JSON(http.StatusOK, map[string]any{"status": "ok", "service": "traces", "version": Version, "spans": reg.For(orgOf(c)).Traces.Count()})
 	})
 	app.Post("/v1/traces/write", func(c *zip.Ctx) error {
 		var req struct {
@@ -145,25 +137,26 @@ func Mount(app *zip.App, deps cloud.Deps) error {
 		if err := c.Bind(&req); err != nil {
 			return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid traces write"})
 		}
+		st := reg.For(orgOf(c)).Traces
 		for _, sp := range req.Spans {
-			traceStore.Append(sp)
+			st.Append(sp)
 		}
 		return c.JSON(http.StatusOK, map[string]any{"written": len(req.Spans)})
 	})
 	app.Get("/v1/traces/trace", func(c *zip.Ctx) error {
-		return c.JSON(http.StatusOK, map[string]any{"spans": traceStore.ByTrace(c.Query("id"))})
+		return c.JSON(http.StatusOK, map[string]any{"spans": reg.For(orgOf(c)).Traces.ByTrace(c.Query("id"))})
 	})
 	app.Get("/v1/traces/query", func(c *zip.Ctx) error {
 		start, _ := strconv.ParseInt(c.Query("start"), 10, 64)
 		end, _ := strconv.ParseInt(c.Query("end"), 10, 64)
 		limit, _ := strconv.Atoi(c.Query("limit"))
-		res := traceStore.Recent(start, end, limit)
+		res := reg.For(orgOf(c)).Traces.Recent(start, end, limit)
 		return c.JSON(http.StatusOK, map[string]any{"count": len(res), "spans": res})
 	})
 
 	log.Info("mounted native ZAP observability store (metrics+logs+traces)",
-		"version", Version, "durable", deps.DataDir != "",
-		"routes", "/v1/{metrics,logs,traces}/*")
+		"version", Version, "durable", deps.DataDir != "", "brand", brand,
+		"routes", "/v1/{metrics,logs,traces}/*", "tenancy", "X-Org-Id")
 	return nil
 }
 
