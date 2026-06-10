@@ -14,6 +14,7 @@ package metrics
 import (
 	"fmt"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 
@@ -23,7 +24,7 @@ import (
 )
 
 // Version is surfaced on the /health routes.
-const Version = "0.3.0"
+const Version = "0.4.0"
 
 // reg is the process-global per-tenant store registry, initialised in Mount.
 var reg *Registry
@@ -61,6 +62,17 @@ func Mount(app *zip.App, deps cloud.Deps) error {
 	log := deps.Logger.New("subsystem", "o11y")
 	reg = NewRegistry(deps.DataDir)
 	brand = deps.Brand
+
+	// Optional ZAP push ingest — bind a luxfi/zap node accepting MsgMetricBatch
+	// when O11Y_ZAP_PORT is set. HTTP /v1/metrics/batch carries the same wire
+	// shape, so this is a transport optimisation, not a requirement.
+	if p := os.Getenv("O11Y_ZAP_PORT"); p != "" {
+		if port, err := strconv.Atoi(p); err == nil {
+			if _, err := startZAPReceiver(port, "o11y-metrics-"+brand, log); err != nil {
+				log.Warn("zap metric receiver disabled", "err", err)
+			}
+		}
+	}
 
 	// --- Metrics ---
 	app.Get("/v1/metrics/health", func(c *zip.Ctx) error {
