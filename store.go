@@ -10,6 +10,7 @@
 package metrics
 
 import (
+	"encoding/json"
 	"sort"
 	"strings"
 	"sync"
@@ -35,6 +36,7 @@ type Store struct {
 	mu           sync.RWMutex
 	series       map[string]*Series
 	maxPerSeries int
+	wal          *WAL // nil = in-memory only
 }
 
 // NewStore returns an empty store with a default per-series retention of 64Ki
@@ -65,9 +67,50 @@ func seriesKey(name string, labels map[string]string) string {
 	return b.String()
 }
 
+// EnableDurability opens a write-ahead log at path and replays it into the
+// store so samples survive restart. Replayed samples are not re-logged. Pass a
+// per-deployment path (e.g. <DataDir>/metrics/metrics.wal).
+func (s *Store) EnableDurability(path string) error {
+	w, err := OpenWAL(path)
+	if err != nil {
+		return err
+	}
+	if err := w.Replay(func(rec []byte) {
+		var ws walSample
+		if json.Unmarshal(rec, &ws) == nil {
+			s.appendMem(ws.Name, ws.Labels, ws.Sample)
+		}
+	}); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.wal = w
+	s.mu.Unlock()
+	return nil
+}
+
+// walSample is the on-disk record for one appended sample.
+type walSample struct {
+	Name   string            `json:"n"`
+	Labels map[string]string `json:"l,omitempty"`
+	Sample Sample            `json:"s"`
+}
+
 // Append adds one sample to the series identified by (name, labels), creating
-// the series on first write and evicting the oldest sample past retention.
+// the series on first write and evicting the oldest sample past retention. When
+// durability is enabled the sample is also written to the WAL.
 func (s *Store) Append(name string, labels map[string]string, smp Sample) {
+	s.appendMem(name, labels, smp)
+	if s.wal != nil {
+		if rec, err := json.Marshal(walSample{Name: name, Labels: labels, Sample: smp}); err == nil {
+			_ = s.wal.Append(rec)
+		}
+	}
+}
+
+// appendMem applies a sample to the in-memory index only (used by Append and by
+// WAL replay, which must not re-log).
+func (s *Store) appendMem(name string, labels map[string]string, smp Sample) {
 	k := seriesKey(name, labels)
 	s.mu.Lock()
 	defer s.mu.Unlock()
