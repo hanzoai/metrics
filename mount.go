@@ -11,6 +11,7 @@ package metrics
 import (
 	"fmt"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -19,12 +20,17 @@ import (
 	metric "github.com/luxfi/metric"
 )
 
-// Version is surfaced on /v1/metrics/health.
+// Version is surfaced on the /health routes.
 const Version = "0.1.0"
 
-// store is the process-global in-memory store. A durable per-tenant backend can
-// replace it behind the same Store API without touching the handlers below.
-var store = NewStore()
+// The three native observability signals share the WAL-backed store pattern and
+// mount under one subsystem. A durable per-tenant backend can replace each store
+// behind its existing API without touching the handlers below.
+var (
+	store      = NewStore()      // metrics
+	logStore   = NewLogStore()   // logs   (Loki-free)
+	traceStore = NewTraceStore() // traces (Tempo-free)
+)
 
 // init registers the subsystem. cloud.MountFunc takes app as `any` (to avoid an
 // import cycle in pkg/cloud), so we assert it to *zip.App and call the typed Mount.
@@ -40,8 +46,24 @@ func init() {
 
 // Mount registers the native metrics routes on the shared cloud App per HIP-0106.
 func Mount(app *zip.App, deps cloud.Deps) error {
-	log := deps.Logger.New("subsystem", "metrics")
+	log := deps.Logger.New("subsystem", "o11y")
 
+	// Durability — replay/append WALs under DataDir so all three signals survive
+	// restart. Falls back to in-memory if DataDir is unset or unwritable.
+	if deps.DataDir != "" {
+		dir := filepath.Join(deps.DataDir, "o11y")
+		for name, enable := range map[string]func(string) error{
+			"metrics.wal": store.EnableDurability,
+			"logs.wal":    logStore.EnableDurability,
+			"traces.wal":  traceStore.EnableDurability,
+		} {
+			if err := enable(filepath.Join(dir, name)); err != nil {
+				log.Warn("durability disabled", "wal", name, "err", err)
+			}
+		}
+	}
+
+	// --- Metrics ---
 	// Liveness/readiness — always answers, no auth, no external dep.
 	app.Get("/v1/metrics/health", func(c *zip.Ctx) error {
 		return c.JSON(http.StatusOK, map[string]any{
@@ -88,7 +110,60 @@ func Mount(app *zip.App, deps cloud.Deps) error {
 		return c.JSON(http.StatusOK, map[string]any{"count": len(res), "series": res})
 	})
 
-	log.Info("mounted native ZAP metrics store", "version", Version, "routes", "/v1/metrics/{health,batch,write,query}")
+	// --- Logs (native, Loki-free) ---
+	app.Get("/v1/logs/health", func(c *zip.Ctx) error {
+		return c.JSON(http.StatusOK, map[string]any{"status": "ok", "service": "logs", "version": Version, "records": logStore.Count()})
+	})
+	app.Post("/v1/logs/write", func(c *zip.Ctx) error {
+		var req struct {
+			Records []LogRecord `json:"records"`
+		}
+		if err := c.Bind(&req); err != nil {
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid logs write"})
+		}
+		for _, r := range req.Records {
+			logStore.Append(r)
+		}
+		return c.JSON(http.StatusOK, map[string]any{"written": len(req.Records)})
+	})
+	app.Get("/v1/logs/query", func(c *zip.Ctx) error {
+		start, _ := strconv.ParseInt(c.Query("start"), 10, 64)
+		end, _ := strconv.ParseInt(c.Query("end"), 10, 64)
+		limit, _ := strconv.Atoi(c.Query("limit"))
+		res := logStore.Query(parseMatchers(c.Query("match")), start, end, c.Query("contains"), limit)
+		return c.JSON(http.StatusOK, map[string]any{"count": len(res), "records": res})
+	})
+
+	// --- Traces (native, Tempo-free) ---
+	app.Get("/v1/traces/health", func(c *zip.Ctx) error {
+		return c.JSON(http.StatusOK, map[string]any{"status": "ok", "service": "traces", "version": Version, "spans": traceStore.Count()})
+	})
+	app.Post("/v1/traces/write", func(c *zip.Ctx) error {
+		var req struct {
+			Spans []Span `json:"spans"`
+		}
+		if err := c.Bind(&req); err != nil {
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid traces write"})
+		}
+		for _, sp := range req.Spans {
+			traceStore.Append(sp)
+		}
+		return c.JSON(http.StatusOK, map[string]any{"written": len(req.Spans)})
+	})
+	app.Get("/v1/traces/trace", func(c *zip.Ctx) error {
+		return c.JSON(http.StatusOK, map[string]any{"spans": traceStore.ByTrace(c.Query("id"))})
+	})
+	app.Get("/v1/traces/query", func(c *zip.Ctx) error {
+		start, _ := strconv.ParseInt(c.Query("start"), 10, 64)
+		end, _ := strconv.ParseInt(c.Query("end"), 10, 64)
+		limit, _ := strconv.Atoi(c.Query("limit"))
+		res := traceStore.Recent(start, end, limit)
+		return c.JSON(http.StatusOK, map[string]any{"count": len(res), "spans": res})
+	})
+
+	log.Info("mounted native ZAP observability store (metrics+logs+traces)",
+		"version", Version, "durable", deps.DataDir != "",
+		"routes", "/v1/{metrics,logs,traces}/*")
 	return nil
 }
 
