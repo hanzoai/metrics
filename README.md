@@ -1,3 +1,5 @@
+<p align="center"><img src=".github/hero.svg" alt="metrics" width="880"></p>
+
 # Hanzo Metrics
 
 High-performance time-series metrics database.
