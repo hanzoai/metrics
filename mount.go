@@ -19,7 +19,7 @@ import (
 	"strings"
 
 	"github.com/hanzoai/cloud"
-	"github.com/hanzoai/zip"
+	"github.com/zap-proto/zip"
 	metric "github.com/luxfi/metric"
 )
 
