@@ -1,6 +1,7 @@
-// HIP-0106 Mount() entry point for the native observability subsystem.
+// HIP-0106 native observability subsystem — New/Mount composition-root form.
 //
-//	import _ "github.com/hanzoai/metrics" // init() registers the subsystem
+//	import "github.com/hanzoai/metrics"
+//	metrics.Mount(app, metrics.Deps{Logger: log, DataDir: dir, Brand: brand})
 //
 // One subsystem serves all three signals — metrics, logs, traces — under
 // /v1/{metrics,logs,traces}/* on the shared zip.App. Storage is native and
@@ -9,18 +10,22 @@
 // gateway-minted X-Org-Id header (falling back to the deployment brand), so the
 // same binary serves any tenant with hard data isolation. There is no
 // prometheus, no Grafana, no scrape endpoint, no /api/ path.
+//
+// This package imports ONLY zap-proto/zip + luxfi (no hanzoai/cloud): it depends
+// on the 3 things it uses — a logger, a data dir, and the brand — which it
+// declares in its own Deps. The composition root (cmd/cloud) constructs those and
+// calls Mount explicitly; there is no global registry and no init() side effect.
 package metrics
 
 import (
-	"fmt"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
 
-	"github.com/hanzoai/cloud"
-	"github.com/zap-proto/zip"
+	luxlog "github.com/luxfi/log"
 	metric "github.com/luxfi/metric"
+	"github.com/zap-proto/zip"
 )
 
 // Version is surfaced on the /health routes.
@@ -33,16 +38,17 @@ var reg *Registry
 // no X-Org-Id (single-tenant deployments).
 var brand string
 
-// init registers the subsystem. cloud.MountFunc takes app as `any` (to avoid an
-// import cycle in pkg/cloud), so we assert it to *zip.App and call the typed Mount.
-func init() {
-	cloud.Register("metrics", 40, func(app any, deps cloud.Deps) error {
-		zapp, ok := app.(*zip.App)
-		if !ok {
-			return fmt.Errorf("metrics.Mount: app is %T, want *zip.App", app)
-		}
-		return Mount(zapp, deps)
-	})
+// Deps is the NARROW dependency surface this subsystem declares — only the three
+// things it uses. The composition root builds it from Config and passes it to
+// Mount. No hanzoai/cloud import, no god-struct: a subsystem depends on what it
+// needs, nothing more.
+type Deps struct {
+	// Logger is the canonical Hanzo logger; Mount derives a scoped child.
+	Logger luxlog.Logger
+	// DataDir is the per-deployment data root; per-org WALs land under it.
+	DataDir string
+	// Brand is the default tenant when a request omits X-Org-Id.
+	Brand string
 }
 
 // orgOf resolves the tenant for a request: the gateway-minted X-Org-Id header,
@@ -58,7 +64,7 @@ func orgOf(c *zip.Ctx) string {
 }
 
 // Mount registers the native observability routes on the shared cloud App.
-func Mount(app *zip.App, deps cloud.Deps) error {
+func Mount(app *zip.App, deps Deps) error {
 	log := deps.Logger.New("subsystem", "o11y")
 	reg = NewRegistry(deps.DataDir)
 	brand = deps.Brand
