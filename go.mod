@@ -3,7 +3,6 @@ module github.com/hanzoai/metrics
 go 1.26.4
 
 require (
-	github.com/hanzoai/cloud v0.1.1
 	github.com/luxfi/log v1.4.3
 	github.com/luxfi/metric v1.5.8
 	github.com/luxfi/zap v0.7.2
