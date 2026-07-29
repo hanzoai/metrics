@@ -6,7 +6,7 @@ require (
 	github.com/luxfi/log v1.4.3
 	github.com/luxfi/metric v1.5.8
 	github.com/luxfi/zap v0.7.2
-	github.com/zap-proto/zip v1.10.0
+	github.com/zap-proto/zip v1.18.1
 )
 
 require (
@@ -36,7 +36,7 @@ require (
 	github.com/valyala/fasthttp v1.70.0 // indirect
 	github.com/zap-proto/fiber/v3 v3.2.1 // indirect
 	github.com/zap-proto/go v1.3.0 // indirect
-	github.com/zap-proto/http v0.3.0 // indirect
+	github.com/zap-proto/http v0.3.1 // indirect
 	golang.org/x/crypto v0.52.0 // indirect
 	golang.org/x/mod v0.36.0 // indirect
 	golang.org/x/net v0.55.0 // indirect
