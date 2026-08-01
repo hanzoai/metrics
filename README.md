@@ -1,3 +1,8 @@
+> **Archived.** Hanzo Metrics is superseded by [hanzoai/o11y](https://github.com/hanzoai/o11y),
+> which serves metrics, logs and traces from one subsystem at `/v1/o11y/*`. Nothing new
+> should depend on this repository; it is kept read-only for history. What follows
+> describes the retired product.
+
 <p align="center"><img src=".github/hero.svg" alt="metrics" width="880"></p>
 
 # Hanzo Metrics
