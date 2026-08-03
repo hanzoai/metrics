@@ -146,14 +146,21 @@ func TestLogsAndTraces(t *testing.T) {
 	if got := num(t, do(t, app, "POST", "/v1/traces/write", "", spans), "written"); got != 3 {
 		t.Fatalf("spans written = %v, want 3", got)
 	}
-	if got := len(do(t, app, "GET", "/v1/traces/trace?id=t1", "", nil)["spans"].([]any)); got != 2 {
+	// The id is in the PATH now: /v1/traces/trace?id= said the word twice.
+	if got := len(do(t, app, "GET", "/v1/traces/t1", "", nil)["spans"].([]any)); got != 2 {
 		t.Fatalf("trace t1 waterfall = %d spans, want 2", got)
 	}
+	// AND THE STATIC SIBLINGS STILL WIN. `/v1/traces/:id` covers `query` and
+	// `health` too, and what keeps them reachable is zip resolving by SPECIFICITY
+	// rather than registration order (ServeMux-1.22 semantics, from the
+	// zap-proto/fiber fork). These two assertions are what makes that a checked
+	// property of this mount instead of a belief about the router: without them
+	// the line above stays green while both siblings are swallowed.
 	if got := num(t, do(t, app, "GET", "/v1/traces/query?limit=2", "", nil), "count"); got != 2 {
-		t.Fatalf("traces query count = %v, want 2 (limit honoured)", got)
+		t.Fatalf("traces query count = %v, want 2 — did /v1/traces/:id swallow `query`?", got)
 	}
 	if got := num(t, do(t, app, "GET", "/v1/traces/health", "", nil), "spans"); got != 3 {
-		t.Fatalf("traces health spans = %v, want 3", got)
+		t.Fatalf("traces health spans = %v, want 3 — did /v1/traces/:id swallow `health`?", got)
 	}
 }
 

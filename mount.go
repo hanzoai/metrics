@@ -161,15 +161,33 @@ func Mount(app *zip.App, deps Deps) error {
 		}
 		return c.JSON(http.StatusOK, map[string]any{"written": len(req.Spans)})
 	})
-	app.Get("/v1/traces/trace", func(c *zip.Ctx) error {
-		return c.JSON(http.StatusOK, map[string]any{"spans": reg.For(orgOf(c)).Traces.ByTrace(c.Query("id"))})
-	})
 	app.Get("/v1/traces/query", func(c *zip.Ctx) error {
 		start, _ := strconv.ParseInt(c.Query("start"), 10, 64)
 		end, _ := strconv.ParseInt(c.Query("end"), 10, 64)
 		limit, _ := strconv.Atoi(c.Query("limit"))
 		res := reg.For(orgOf(c)).Traces.Recent(start, end, limit)
 		return c.JSON(http.StatusOK, map[string]any{"count": len(res), "spans": res})
+	})
+
+	// ONE TRACE, ADDRESSED BY ID — and the id is in the PATH, not in `?id=`.
+	//
+	// This was GET /v1/traces/trace?id=…, which says the word twice: `traces` is
+	// already the collection, so `trace` under it named nothing the namespace had
+	// not said. A trace addressed by id or not at all is exactly an item route.
+	//
+	// `/:id` sits directly under /v1/traces and its pattern also covers `health`,
+	// `write` and `query`. Those three keep working because zip resolves by
+	// SPECIFICITY, not by registration order — it inherits ServeMux-1.22 semantics
+	// from the zap-proto/fiber fork, so the most specific pattern wins wherever it
+	// was declared and a genuinely ambiguous overlap panics at registration rather
+	// than silently picking one. Verified, not assumed: registering this route
+	// FIRST, ahead of all three statics, leaves the suite green.
+	//
+	// So the position below is readability, not correctness — do not "fix" a
+	// future ordering bug by moving lines around, because order is not what
+	// decides this.
+	app.Get("/v1/traces/:id", func(c *zip.Ctx) error {
+		return c.JSON(http.StatusOK, map[string]any{"spans": reg.For(orgOf(c)).Traces.ByTrace(c.Param("id"))})
 	})
 
 	log.Info("mounted native ZAP observability store (metrics+logs+traces)",
