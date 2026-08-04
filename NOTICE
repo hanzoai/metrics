@@ -1,0 +1,74 @@
+RETIRED — SUCCEEDED BY github.com/hanzoai/o11y
+
+This repository is archived and read-only. Do not depend on it. Everything it
+served is served by hanzoai/o11y, and as of the retirement nothing in the estate
+imports this module at all.
+
+
+WHERE EACH ROUTE WENT
+
+This module mounted eleven routes on the Hanzo Cloud router — a probe, an ingest
+door and a query door for each of three signals — over a per-org in-process map
+bounded at 65536 samples per series.
+
+The three PROBES kept their addresses and moved into hanzoai/cloud's own o11y
+package (apps/o11y/signals.go). They still answer 200 to an anonymous caller,
+and each now names the durable store that actually holds its signal:
+
+    GET /v1/metrics/health     -> event.metric   read at GET /v1/o11y/metrics
+    GET /v1/logs/health        -> event.log      read at GET /v1/o11y/logs
+    GET /v1/traces/health      -> event.span     read at GET /v1/o11y/traces/{traceId}
+
+The other EIGHT are retired, not ported:
+
+    POST /v1/metrics/batch     POST /v1/metrics/write     GET /v1/metrics/query
+    POST /v1/logs/write        GET  /v1/logs/query
+    POST /v1/traces/write      GET  /v1/traces/query      GET /v1/traces/trace
+
+They were a second way to write and read signals hanzoai/o11y already stores on
+its columnar plane, and the second way was the worse one. hanzoai/o11y ingests
+the SAME luxfi/metric MetricBatch wire this module's /v1/metrics/batch accepted
+(pkg/zapmetricreceiver -> pkg/datastoremetrics), so no producer has a shape to
+change — only an address.
+
+
+WHY DELETING THEM WAS SAFE, MEASURED RATHER THAN ASSUMED
+
+On api.hanzo.ai, before anything was removed:
+
+  * /v1/logs/health   reported records=0
+  * /v1/traces/health reported spans=0
+  * all three query doors answered count=0
+
+An EMPTY store, not a small one. A git-grep sweep of every repository in the
+hanzo, lux and zoo orgs found no caller of /v1/metrics/{batch,write},
+/v1/logs/write or /v1/traces/write anywhere except this module itself and three
+DERIVED artifacts of the published API document (hanzoai/cloud's openapi.yaml,
+hanzoai/openapi's aggregate, and hanzoai/cli's generated command surface). Zero
+producers, zero consumers, zero rows.
+
+
+THE LAST COMMIT ON THIS REPOSITORY IS OBSOLETE, NOT PENDING
+
+A change was written here — replacing GET /v1/traces/trace?id=... with the item
+route GET /v1/traces/{id}, because `traces/trace` said the word twice — and it
+could never be pushed: an archived repository is read-only. It does not need a
+home. hanzoai/o11y has served GET /v1/o11y/traces/{traceId} all along
+(pkg/query-service/app/routes_traces.go), over the durable store, with waterfall,
+aggregations and flamegraph reads beside it. Two addresses for one trace was the
+duplication; the one over an in-memory map is the one that went. Nothing is
+stranded, and nothing is owed.
+
+
+THE DEPENDENTS
+
+hanzoai/cloud was the only repository that ever imported this package, and it no
+longer does. The remaining `github.com/hanzoai/metrics` lines in the estate's
+go.mod files (hanzoai/ai, hanzoai/licensing, hanzoai/visor) are all marked
+// indirect — inherited through the module graph, imported by nothing — and drop
+out on the next `go mod tidy` taken against a cloud release that carries this
+retirement.
+
+
+Successor:  https://github.com/hanzoai/o11y
+Public API: /v1/o11y/*, plus /v1/{metrics,logs,traces}/health
