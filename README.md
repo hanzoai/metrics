@@ -1,12 +1,11 @@
-> **Archived.** Hanzo Metrics is superseded by [hanzoai/o11y](https://github.com/hanzoai/o11y),
-> which serves metrics, logs and traces from one subsystem at `/v1/o11y/*`. Nothing new
+> **Archived.** Hanzo Metrics is superseded by
+> [hanzoai/o11y](https://github.com/hanzoai/o11y), whose `metrics` package holds
+> this code now and serves all three signals under `/v1/metrics/*`. Nothing new
 > should depend on this repository; it is kept read-only for history. What follows
 > describes the retired product.
 >
-> [**NOTICE**](NOTICE) says where each of the eleven routes went, what was measured
-> before the eight duplicate doors were deleted, and why the last commit written
-> here is obsolete rather than pending. `hanzoai/cloud` was the only importer and
-> no longer imports it.
+> [**NOTICE**](NOTICE) says where the eleven routes went — all of them, with the
+> store — and which claims an earlier draft of it got wrong.
 
 <p align="center"><img src=".github/hero.svg" alt="metrics" width="880"></p>
 
