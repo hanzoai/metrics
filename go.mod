@@ -6,7 +6,7 @@ require (
 	github.com/luxfi/log v1.4.3
 	github.com/luxfi/metric v1.10.0
 	github.com/luxfi/zap v1.2.7
-	github.com/zap-proto/zip v1.34.1
+	github.com/zap-proto/zip v1.34.2
 )
 
 require (
