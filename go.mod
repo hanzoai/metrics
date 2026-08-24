@@ -1,4 +1,4 @@
-module github.com/hanzoai/metrics
+module hanzo.ai/metrics
 
 go 1.26.5
 

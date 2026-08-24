@@ -1,6 +1,6 @@
 // HIP-0106 native observability subsystem — New/Mount composition-root form.
 //
-//	import "github.com/hanzoai/metrics"
+//	import "hanzo.ai/metrics"
 //	metrics.Mount(app, metrics.Deps{Logger: log, DataDir: dir, Brand: brand, Org: principal.Org})
 //
 // One subsystem serves all three signals — metrics, logs, traces — under
